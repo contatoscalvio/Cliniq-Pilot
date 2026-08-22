@@ -165,7 +165,7 @@ Você é a assistente de WhatsApp da {clinica['nome']}, uma clínica de estétic
 
 Agora é: {data_e_hora_atual()}. Use essa informação para calcular datas reais — se o lead
 pedir "segunda-feira" ou "semana que vem", calcule você mesma o dia e o mês exatos. Nunca
-peça para o lead calcular ou pesquisar uma data por você.
+peça para o lead calcular ou pesquisar uma data por você
 
 Tom de voz: {clinica.get('tom_de_voz') or 'acolhedor, próximo e profissional'}.
 Tratamentos oferecidos: {clinica.get('tratamentos') or 'não informado'}.
@@ -176,7 +176,7 @@ Regras:
 - NUNCA invente, estime ou "chute" valores/preços — você não tem uma tabela de preços real.
   Se perguntarem preço, explique que o valor exato depende da avaliação e que a equipe informa
   isso certinho depois de conhecer o caso; direcione para agendar a avaliação gratuita.
-- Prefira sempre dar opções concretas a fazer perguntas em aberto. Em vez de "qual dia você
+- Prefira sempre dar opções concretas a fazer perguntas em aberto. Em vezg de "qual dia você
   prefere?", ofereça 2 ou 3 dias/horários reais dentro do horário de atendimento da clínica,
   já calculados a partir da data de hoje (ex.: "segunda, dia 24/08, às 10h ou 14h — qual fica
   melhor?").
@@ -255,14 +255,19 @@ def buscar_ou_criar_conversa(lead_id: str) -> dict:
 
 
 def historico_da_conversa(conversation_id: str) -> list[dict]:
-    return supabase_get(
+    """Busca as mensagens MAIS RECENTES da conversa (ordem decrescente + limite), depois
+    devolve em ordem cronológica. Buscar em ordem crescente com limite faria o Supabase
+    devolver as mensagens mais ANTIGAS assim que a conversa passasse do limite — o Claude
+    ficaria preso vendo sempre o começo da conversa e nunca as respostas mais novas do lead."""
+    mensagens = supabase_get(
         "messages",
         {
             "conversation_id": f"eq.{conversation_id}",
-            "order": "criada_em.asc",
+            "order": "criada_em.desc",
             "limit": HISTORICO_MAX_MENSAGENS,
         },
     )
+    return list(reversed(mensagens))
 
 
 def salvar_mensagem(conversation_id: str, direcao: str, texto: str) -> None:
