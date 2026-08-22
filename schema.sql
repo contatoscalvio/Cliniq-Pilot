@@ -42,7 +42,10 @@ create table if not exists conversations (
   id uuid primary key default gen_random_uuid(),
   lead_id uuid not null references leads(id),
   iniciada_em timestamptz not null default now(),
-  ultima_mensagem_em timestamptz not null default now()
+  ultima_mensagem_em timestamptz not null default now(),
+  encerrada_em timestamptz -- preenchido quando o atendimento chega a uma conclusão natural;
+                            -- null enquanto a conversa está em aberto. Uma nova mensagem do
+                            -- lead depois disso começa uma conversa nova (contexto limpo).
 );
 
 create table if not exists messages (
