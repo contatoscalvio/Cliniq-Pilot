@@ -26,7 +26,7 @@ próxima mensagem do lead abre uma conversa nova, com contexto limpo.
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -52,6 +52,12 @@ WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 EQUIPE_WHATSAPP = os.environ.get("EQUIPE_WHATSAPP", "")
 
 HISTORICO_MAX_MENSAGENS = 20  # quantas mensagens recentes mandamos pro Claude como contexto
+
+# Se o lead mandar mensagem dentro desta janela depois de um atendimento encerrado, reabrimos
+# a MESMA conversa (com todo o histórico) em vez de começar uma em branco — evita que uma
+# pergunta de acompanhamento logo após um agendamento derrube nome, procedimento e horário já
+# combinados. Passado esse tempo, aí sim consideramos que é um assunto novo de verdade.
+JANELA_REABERTURA_CONVERSA = timedelta(hours=2)
 
 # Fuso horário usado pra calcular datas reais (ex.: "próxima segunda-feira") — sem
 # isso o Claude não tem como saber que dia é hoje.
@@ -183,10 +189,13 @@ Regras:
 - Se o lead quiser agendar, colete nome completo e procedimento de interesse, e confirme um
   dia e horário exatos (com data calculada por você, não pelo lead); informe que a equipe
   confirma em até 24h.
-- Todo atendimento tem início e fim. Quando o assunto do lead estiver resolvido — agendou,
-  tirou a dúvida que tinha, ou se despediu — feche a conversa de forma natural e educada
-  (agradeça, reforce o próximo passo se houver) e marque encerrar_atendimento como true. Não
-  fique reabrindo assuntos já resolvidos nem insistindo depois que o lead já se despediu.
+- Todo atendimento tem início e fim, mas só marque encerrar_atendimento como true quando o
+  PRÓPRIO LEAD sinalizar claramente que não precisa de mais nada agora — uma despedida, um
+  "obrigado, é só isso" ou equivalente. Confirmar um agendamento, sozinho, NÃO é motivo para
+  encerrar: é exatamente quando o lead mais tende a mandar perguntas de acompanhamento (quem
+  vai atender, endereço, o que levar). Quando o encerramento for claro, feche a conversa de
+  forma natural e educada (agradeça, reforce o próximo passo se houver). Não fique reabrindo
+  assuntos já resolvidos nem insistindo depois que o lead já se despediu.
 - Se perceber que está repetindo a mesma pergunta ou resposta sem avançar (o lead não
   conseguiu resolver algo com você em duas tentativas), preencha motivo_alerta para a equipe
   assumir, em vez de insistir sozinha.
@@ -237,20 +246,31 @@ def buscar_ou_criar_lead(clinic_id: str, telefone: str) -> dict:
 
 
 def buscar_ou_criar_conversa(lead_id: str) -> dict:
-    """Reaproveita a conversa mais recente só se ela ainda estiver aberta — depois que um
-    atendimento é encerrado, a próxima mensagem do lead começa uma conversa nova, com
-    contexto limpo, em vez de emendar num histórico que já tinha se resolvido."""
+    """Reaproveita a conversa mais recente do lead se ela ainda estiver aberta OU se tiver
+    sido encerrada há pouco tempo (dentro de JANELA_REABERTURA_CONVERSA) — nesse caso,
+    reabre a mesma conversa (limpa encerrada_em) em vez de começar uma em branco. Isso evita
+    que uma pergunta de acompanhamento logo depois de um agendamento derrube todo o contexto
+    já combinado (nome, procedimento, dia e horário). Só depois dessa janela é que uma
+    mensagem nova do lead começa, de fato, uma conversa com contexto limpo."""
     existente = supabase_get(
         "conversations",
         {
             "lead_id": f"eq.{lead_id}",
-            "encerrada_em": "is.null",
             "order": "iniciada_em.desc",
             "limit": 1,
         },
     )
     if existente:
-        return existente[0]
+        conversa = existente[0]
+        if conversa["encerrada_em"] is None:
+            return conversa
+
+        encerrada_em = datetime.fromisoformat(conversa["encerrada_em"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) - encerrada_em < JANELA_REABERTURA_CONVERSA:
+            supabase_update("conversations", conversa["id"], {"encerrada_em": None})
+            conversa["encerrada_em"] = None
+            return conversa
+
     return supabase_insert("conversations", {"lead_id": lead_id})
 
 
