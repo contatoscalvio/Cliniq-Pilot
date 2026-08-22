@@ -15,11 +15,19 @@ o lead é criado no CRM assim que a primeira mensagem chega — não esperamos o
 "completos" pra registrar. `dados_completos` é só um status dentro do registro, nunca
 uma condição pra ele existir. Isso evita perder rastro de conversas abandonadas no
 meio, que era o problema original que esse projeto inteiro tenta resolver.
+
+Segunda decisão de design (após revisar uma conversa real de teste): o atendimento
+precisa ter início e fim. Sem isso, o bot emenda mensagens novas no mesmo histórico
+pra sempre, mesmo depois que o assunto do lead já foi resolvido. Por isso a ferramenta
+`responder_e_classificar` tem um campo `encerrar_atendimento` — quando o Claude marca
+esse campo como true, a conversa atual é fechada (`conversations.encerrada_em`) e a
+próxima mensagem do lead abre uma conversa nova, com contexto limpo.
 """
 
 import os
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Request
@@ -44,6 +52,19 @@ WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 EQUIPE_WHATSAPP = os.environ.get("EQUIPE_WHATSAPP", "")
 
 HISTORICO_MAX_MENSAGENS = 20  # quantas mensagens recentes mandamos pro Claude como contexto
+
+# Fuso horário usado pra calcular datas reais (ex.: "próxima segunda-feira") — sem
+# isso o Claude não tem como saber que dia é hoje.
+FUSO_HORARIO = ZoneInfo("America/Sao_Paulo")
+DIAS_DA_SEMANA = {
+    0: "segunda-feira",
+    1: "terça-feira",
+    2: "quarta-feira",
+    3: "quinta-feira",
+    4: "sexta-feira",
+    5: "sábado",
+    6: "domingo",
+}
 
 app = FastAPI()
 claude = Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -98,6 +119,15 @@ FERRAMENTA_RESPOSTA = {
                 "type": "boolean",
                 "description": "true quando já sabemos o nome e o procedimento de interesse do lead.",
             },
+            "encerrar_atendimento": {
+                "type": "boolean",
+                "description": (
+                    "true quando esta mensagem encerra o atendimento — o lead já agendou, já tirou a "
+                    "dúvida que tinha, ou se despediu e não precisa de mais nada agora. false enquanto "
+                    "o atendimento ainda está em aberto. Quando true, a mensagem_para_lead deve soar "
+                    "como um encerramento natural, não como mais uma pergunta."
+                ),
+            },
             "motivo_alerta": {
                 "type": "string",
                 "description": (
@@ -114,10 +144,18 @@ FERRAMENTA_RESPOSTA = {
             "origem",
             "procedimento_interesse",
             "dados_completos",
+            "encerrar_atendimento",
             "motivo_alerta",
         ],
     },
 }
+
+
+def data_e_hora_atual() -> str:
+    """Data/hora de agora no fuso da clínica, em texto — pro Claude calcular datas reais."""
+    agora = datetime.now(FUSO_HORARIO)
+    dia_semana = DIAS_DA_SEMANA[agora.weekday()]
+    return f"{dia_semana}, {agora.strftime('%d/%m/%Y')}, {agora.strftime('%H:%M')}"
 
 
 def montar_prompt_sistema(clinica: dict) -> str:
@@ -125,15 +163,35 @@ def montar_prompt_sistema(clinica: dict) -> str:
     return f"""
 Você é a assistente de WhatsApp da {clinica['nome']}, uma clínica de estética.
 
+Agora é: {data_e_hora_atual()}. Use essa informação para calcular datas reais — se o lead
+pedir "segunda-feira" ou "semana que vem", calcule você mesma o dia e o mês exatos. Nunca
+peça para o lead calcular ou pesquisar uma data por você.
+
 Tom de voz: {clinica.get('tom_de_voz') or 'acolhedor, próximo e profissional'}.
 Tratamentos oferecidos: {clinica.get('tratamentos') or 'não informado'}.
 Horário de atendimento: {clinica.get('horario') or 'não informado'}.
 
 Regras:
 - Nunca prometa resultado de tratamento nem dê diagnóstico médico.
-- Se o lead perguntar preço, dê uma faixa aproximada se souber e sempre convide para a avaliação gratuita.
-- Se o lead quiser agendar, colete nome completo e melhor horário, e informe que a equipe confirma em até 24h.
-- Responda sempre pelo campo mensagem_para_lead da ferramenta responder_e_classificar — nunca fora dela.
+- NUNCA invente, estime ou "chute" valores/preços — você não tem uma tabela de preços real.
+  Se perguntarem preço, explique que o valor exato depende da avaliação e que a equipe informa
+  isso certinho depois de conhecer o caso; direcione para agendar a avaliação gratuita.
+- Prefira sempre dar opções concretas a fazer perguntas em aberto. Em vez de "qual dia você
+  prefere?", ofereça 2 ou 3 dias/horários reais dentro do horário de atendimento da clínica,
+  já calculados a partir da data de hoje (ex.: "segunda, dia 24/08, às 10h ou 14h — qual fica
+  melhor?").
+- Se o lead quiser agendar, colete nome completo e procedimento de interesse, e confirme um
+  dia e horário exatos (com data calculada por você, não pelo lead); informe que a equipe
+  confirma em até 24h.
+- Todo atendimento tem início e fim. Quando o assunto do lead estiver resolvido — agendou,
+  tirou a dúvida que tinha, ou se despediu — feche a conversa de forma natural e educada
+  (agradeça, reforce o próximo passo se houver) e marque encerrar_atendimento como true. Não
+  fique reabrindo assuntos já resolvidos nem insistindo depois que o lead já se despediu.
+- Se perceber que está repetindo a mesma pergunta ou resposta sem avançar (o lead não
+  conseguiu resolver algo com você em duas tentativas), preencha motivo_alerta para a equipe
+  assumir, em vez de insistir sozinha.
+- Responda sempre pelo campo mensagem_para_lead da ferramenta responder_e_classificar — nunca
+  fora dela.
 """.strip()
 
 
@@ -179,9 +237,17 @@ def buscar_ou_criar_lead(clinic_id: str, telefone: str) -> dict:
 
 
 def buscar_ou_criar_conversa(lead_id: str) -> dict:
+    """Reaproveita a conversa mais recente só se ela ainda estiver aberta — depois que um
+    atendimento é encerrado, a próxima mensagem do lead começa uma conversa nova, com
+    contexto limpo, em vez de emendar num histórico que já tinha se resolvido."""
     existente = supabase_get(
         "conversations",
-        {"lead_id": f"eq.{lead_id}", "order": "iniciada_em.desc", "limit": 1},
+        {
+            "lead_id": f"eq.{lead_id}",
+            "encerrada_em": "is.null",
+            "order": "iniciada_em.desc",
+            "limit": 1,
+        },
     )
     if existente:
         return existente[0]
@@ -204,6 +270,10 @@ def salvar_mensagem(conversation_id: str, direcao: str, texto: str) -> None:
     supabase_insert("messages", {"conversation_id": conversation_id, "direcao": direcao, "texto": texto})
 
 
+def encerrar_conversa(conversation_id: str) -> None:
+    supabase_update("conversations", conversation_id, {"encerrada_em": datetime.now(timezone.utc).isoformat()})
+
+
 def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
     supabase_insert(
         "alerts",
@@ -212,7 +282,7 @@ def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
     if not EQUIPE_WHATSAPP:
         return
     texto = (
-        f"⚠️ Lead precisa de atenão — {clinica['nome']}\n"
+        f"⚠️ Lead precisa de atenção — {clinica['nome']}\n"
         f"Lead: {lead.get('nome') or lead['telefone']}\n"
         f"Motivo: {motivo}"
     )
@@ -325,6 +395,9 @@ async def webhook_whatsapp(request: Request):
 
     salvar_mensagem(conversa["id"], "saida", mensagem_para_lead)
     enviar_mensagem_whatsapp(instancia, numero_lead, mensagem_para_lead)
+
+    if dados.get("encerrar_atendimento"):
+        encerrar_conversa(conversa["id"])
 
     if dados.get("motivo_alerta"):
         enviar_alerta(clinica, {**lead, **atualizacoes}, dados["motivo_alerta"])
