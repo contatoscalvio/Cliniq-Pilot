@@ -212,7 +212,7 @@ def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
     if not EQUIPE_WHATSAPP:
         return
     texto = (
-        f"⚠️ Lead precisa de atenção — {clinica['nome']}\n"
+        f"⚠️ Lead precisa de atenão — {clinica['nome']}\n"
         f"Lead: {lead.get('nome') or lead['telefone']}\n"
         f"Motivo: {motivo}"
     )
@@ -268,7 +268,7 @@ async def webhook_whatsapp(request: Request):
 
     if key.get("fromMe"):
         # Mensagem que o próprio bot (ou a clínica manualmente) mandou — ignora.
-        return {"ignorado": "mensagem enviada por nós"}
+        return {"ignorado": "mensagem enviada por nos"}
 
     remote_jid = key.get("remoteJid", "")
     if remote_jid.endswith("@g.us"):
@@ -277,7 +277,7 @@ async def webhook_whatsapp(request: Request):
 
     texto_recebido = extrair_texto_mensagem(data)
     if not texto_recebido:
-        return {"ignorado": "mensagem sem texto (áudio, figurinha, etc.)"}
+        return {"ignorado": "mensagem sem texto (audio, figurinha, etc.)"}
 
     instancia = payload.get("instance", "")
     numero_lead = numero_a_partir_do_jid(remote_jid)
