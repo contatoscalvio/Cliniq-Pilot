@@ -207,7 +207,7 @@ def salvar_mensagem(conversation_id: str, direcao: str, texto: str) -> None:
 def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
     supabase_insert(
         "alerts",
-        {"lead_id": lead["id"], "tipo": motivo", "enviado_para": EQUIPE_WHATSAPP or None},
+        {"lead_id": lead["id"], "tipo": motivo, "enviado_para": EQUIPE_WHATSAPP or None},
     )
     if not EQUIPE_WHATSAPP:
         return
