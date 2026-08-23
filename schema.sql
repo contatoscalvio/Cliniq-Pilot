@@ -32,6 +32,8 @@ create table if not exists leads (
   status text not null default 'em_conversa'
     check (status in ('em_conversa', 'novo', 'agendado', 'quente', 'perdido')),
   dados_completos boolean not null default false,
+  data_agendamento date,        -- preenchido quando o bot confirma um agendamento com o lead
+  horario_agendamento text,     -- formato HH:MM, junto com data_agendamento
   criado_em timestamptz not null default now(),
   atualizado_em timestamptz not null default now()
 );

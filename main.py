@@ -51,6 +51,26 @@ WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 # alertas de lead quente / bot travado. Deixe em branco pra desativar por enquanto.
 EQUIPE_WHATSAPP = os.environ.get("EQUIPE_WHATSAPP", "")
 
+# CRM visual (aplicação separada, feita no Bolt, com seu próprio banco). Espelhamos
+# cada lead e cada agendamento pra lá via duas Server Functions HTTP. Se essas
+# variáveis não estiverem configuradas, a sincronização é simplesmente pulada — o
+# bot continua respondendo o lead normalmente, o espelho no CRM visual é sempre
+# best-effort e nunca pode travar a conversa.
+CRM_SYNC_BASE_URL = os.environ.get(
+    "CRM_SYNC_BASE_URL", "https://wqxqqjmipzunetfcfbhy.supabase.co/functions/v1"
+).rstrip("/")
+CRM_SYNC_SECRET = os.environ.get("CRM_SYNC_SECRET", "")
+
+# O CRM visual só entende esses três status; "novo" e "quente" (do nosso funil
+# interno) viram "em_conversa" por lá.
+MAPA_STATUS_CRM = {
+    "novo": "em_conversa",
+    "em_conversa": "em_conversa",
+    "quente": "em_conversa",
+    "agendado": "agendado",
+    "perdido": "perdido",
+}
+
 HISTORICO_MAX_MENSAGENS = 20  # quantas mensagens recentes mandamos pro Claude como contexto
 
 # Se o lead mandar mensagem dentro desta janela depois de um atendimento encerrado, reabrimos
@@ -142,6 +162,23 @@ FERRAMENTA_RESPOSTA = {
                     'Deixe em branco ("") na maioria das mensagens.'
                 ),
             },
+            "data_agendamento": {
+                "type": "string",
+                "description": (
+                    'Data do agendamento já confirmado com o lead, no formato AAAA-MM-DD (ex.: "2026-08-25"), '
+                    "calculada a partir da data de hoje informada no início deste prompt — nunca a data que o "
+                    'lead escreveu literalmente. Preencha sempre que status for "agendado" e um dia exato já '
+                    'tiver sido combinado. Deixe em branco ("") caso contrário.'
+                ),
+            },
+            "horario_agendamento": {
+                "type": "string",
+                "description": (
+                    'Horário do agendamento já confirmado, no formato HH:MM (ex.: "14:00"). Preencha junto com '
+                    'data_agendamento, sempre que um horário exato já tiver sido combinado. Deixe em branco ("") '
+                    "caso contrário."
+                ),
+            },
         },
         "required": [
             "mensagem_para_lead",
@@ -152,6 +189,8 @@ FERRAMENTA_RESPOSTA = {
             "dados_completos",
             "encerrar_atendimento",
             "motivo_alerta",
+            "data_agendamento",
+            "horario_agendamento",
         ],
     },
 }
@@ -188,7 +227,9 @@ Regras:
   melhor?").
 - Se o lead quiser agendar, colete nome completo e procedimento de interesse, e confirme um
   dia e horário exatos (com data calculada por você, não pelo lead); informe que a equipe
-  confirma em até 24h.
+  confirma em até 24h. Sempre que confirmar esse dia e horário, preencha também os campos
+  data_agendamento (AAAA-MM-DD) e horario_agendamento (HH:MM) da ferramenta, usando a mesma
+  data que você calculou para a resposta.
 - Todo atendimento tem início e fim, mas só marque encerrar_atendimento como true quando o
   PRÓPRIO LEAD sinalizar claramente que não precisa de mais nada agora — uma despedida, um
   "obrigado, é só isso" ou equivalente. Confirmar um agendamento, sozinho, NÃO é motivo para
@@ -315,6 +356,56 @@ def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CRM visual (Bolt) — espelho best-effort via Server Functions
+# ---------------------------------------------------------------------------
+
+def sincronizar_lead_crm(telefone: str, nome: str | None, procedimento: str | None, status: str, origem: str | None) -> None:
+    """Espelha o lead no CRM visual. Nunca deixa uma falha aqui derrubar a resposta ao lead —
+    esse CRM é só uma vitrine; a fonte de verdade continua sendo o nosso Supabase."""
+    if not CRM_SYNC_SECRET:
+        return
+    try:
+        httpx.post(
+            f"{CRM_SYNC_BASE_URL}/leads-sync",
+            headers={"x-sync-secret": CRM_SYNC_SECRET, "Content-Type": "application/json"},
+            json={
+                "telefone": telefone,
+                "nome": nome or "",
+                "procedimento_interesse": procedimento or "",
+                "status": MAPA_STATUS_CRM.get(status, "em_conversa"),
+                "origem": origem or "",
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def sincronizar_agendamento_crm(nome: str, procedimento: str, telefone: str, data_agendamento: str, horario_agendamento: str) -> None:
+    """Espelha um agendamento recém-confirmado na tabela appointments do CRM visual."""
+    if not CRM_SYNC_SECRET:
+        return
+    try:
+        momento = datetime.strptime(f"{data_agendamento} {horario_agendamento}", "%Y-%m-%d %H:%M")
+        momento = momento.replace(tzinfo=FUSO_HORARIO)
+        httpx.post(
+            f"{CRM_SYNC_BASE_URL}/appointments-sync",
+            headers={"x-sync-secret": CRM_SYNC_SECRET, "Content-Type": "application/json"},
+            json={
+                "client_name": nome or "",
+                "procedure": procedimento or "",
+                "phone": telefone,
+                "appointment_time": momento.isoformat(),
+                "status": "scheduled",
+                "notes": "",
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Evolution API (envio de mensagem e leitura do webhook)
 # ---------------------------------------------------------------------------
 
@@ -416,7 +507,40 @@ async def webhook_whatsapp(request: Request):
         atualizacoes["origem"] = dados["origem"]
     if dados.get("procedimento_interesse"):
         atualizacoes["procedimento_interesse"] = dados["procedimento_interesse"]
+    if dados.get("data_agendamento"):
+        atualizacoes["data_agendamento"] = dados["data_agendamento"]
+    if dados.get("horario_agendamento"):
+        atualizacoes["horario_agendamento"] = dados["horario_agendamento"]
     supabase_update("leads", lead["id"], atualizacoes)
+
+    nome_atual = atualizacoes.get("nome", lead.get("nome"))
+    procedimento_atual = atualizacoes.get("procedimento_interesse", lead.get("procedimento_interesse"))
+    origem_atual = atualizacoes.get("origem", lead.get("origem"))
+    sincronizar_lead_crm(
+        telefone=numero_lead,
+        nome=nome_atual,
+        procedimento=procedimento_atual,
+        status=dados["status"],
+        origem=origem_atual,
+    )
+
+    agendamento_novo_ou_alterado = (
+        dados.get("data_agendamento")
+        and dados.get("horario_agendamento")
+        and (
+            lead.get("status") != "agendado"
+            or lead.get("data_agendamento") != dados["data_agendamento"]
+            or lead.get("horario_agendamento") != dados["horario_agendamento"]
+        )
+    )
+    if agendamento_novo_ou_alterado:
+        sincronizar_agendamento_crm(
+            nome=nome_atual or "",
+            procedimento=procedimento_atual or "",
+            telefone=numero_lead,
+            data_agendamento=dados["data_agendamento"],
+            horario_agendamento=dados["horario_agendamento"],
+        )
 
     salvar_mensagem(conversa["id"], "saida", mensagem_para_lead)
     enviar_mensagem_whatsapp(instancia, numero_lead, mensagem_para_lead)
