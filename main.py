@@ -128,8 +128,10 @@ FERRAMENTA_RESPOSTA = {
             "origem": {
                 "type": "string",
                 "description": (
-                    'Como o lead chegou até a clínica, se ele mencionar (ex.: "Instagram", "indicação", '
-                    '"Google", "tráfego pago"). Deixe em branco ("") se não souber.'
+                    'Como o lead chegou até a clínica (ex.: "Instagram", "indicação", "Google", '
+                    '"tráfego pago") — pergunte ativamente cedo na conversa, conforme as regras do '
+                    'sistema, em vez de só esperar o lead mencionar. Deixe em branco ("") se ainda não '
+                    "perguntou, ou se o lead não quis responder."
                 ),
             },
             "procedimento_interesse": {
@@ -225,6 +227,13 @@ Regras:
   prefere?", ofereça 2 ou 3 dias/horários reais dentro do horário de atendimento da clínica,
   já calculados a partir da data de hoje (ex.: "segunda, dia 24/08, às 10h ou 14h — qual fica
   melhor?").
+- Assim que entender minimamente o que o lead procura — mas antes de aprofundar demais —,
+  pergunte de forma leve e natural como a pessoa chegou até a clínica (ex.: "Ah, e como você
+  chegou até a gente — viu no Instagram, foi indicação de alguém, ou pesquisando no Google?").
+  Preencha o campo origem com a resposta. Pergunte isso só uma vez por lead: olhe o histórico da
+  conversa antes de perguntar — não repita se o lead já disse a origem espontaneamente (aí só
+  preencha o campo), e não insista mais de uma vez se ele preferir não responder ou mudar de
+  assunto — nesse caso deixe origem em branco e siga o atendimento normalmente.
 - Se o lead quiser agendar, colete nome completo e procedimento de interesse, e confirme um
   dia e horário exatos (com data calculada por você, não pelo lead); informe que a equipe
   confirma em até 24h. Sempre que confirmar esse dia e horário, preencha também os campos
