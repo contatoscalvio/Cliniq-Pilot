@@ -57,13 +57,9 @@ EQUIPE_WHATSAPP = os.environ.get("EQUIPE_WHATSAPP", "")
 # bot continua respondendo o lead normalmente, o espelho no CRM visual é sempre
 # best-effort e nunca pode travar a conversa.
 CRM_SYNC_BASE_URL = os.environ.get(
-    "CRM_SYNC_BASE_URL", "https://eqbnbyxsrognevhoyuvl.supabase.co/functions/v1"
+    "CRM_SYNC_BASE_URL", "https://wqxqqjmipzunetfcfbhy.supabase.co/functions/v1"
 ).rstrip("/")
 CRM_SYNC_SECRET = os.environ.get("CRM_SYNC_SECRET", "")
-
-# UUID da clínica cadastrada no CRM visual (Bolt/Supabase multi-tenant). Toda chamada
-# às Server Functions leads-sync/appointments-sync precisa desse clinic_id.
-CRM_CLINIC_ID = os.environ.get("CRM_CLINIC_ID", "550e8400-e29b-41d4-a716-446655440000")
 
 HISTORICO_MAX_MENSAGENS = 20  # quantas mensagens recentes mandamos pro Claude como contexto
 
@@ -401,27 +397,21 @@ def ja_alertado_por_loop(lead_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def sincronizar_lead_crm(telefone: str, nome: str | None, procedimento: str | None, status: str, origem: str | None) -> None:
-    """Espelha o lead no CRM visual (Bolt). Nunca deixa uma falha aqui derrubar a resposta ao lead —
-    esse CRM é só uma vitrine; a fonte de verdade continua sendo o nosso Supabase."""
+    """Espelha o lead no CRM visual (Bolt — projeto 'Prompt Creation'). Nunca deixa uma falha aqui
+    derrubar a resposta ao lead — esse CRM é só uma vitrine; a fonte de verdade continua sendo o
+    nosso Supabase. A Server Function leads-sync faz upsert por telefone (chave única)."""
     if not CRM_SYNC_SECRET:
         return
-    nome_limpo = (nome or "").strip()
-    partes_nome = nome_limpo.split(" ", 1) if nome_limpo else []
-    primeiro_nome = partes_nome[0] if partes_nome else "Lead"
-    sobrenome = partes_nome[1] if len(partes_nome) > 1 else None
     try:
         httpx.post(
             f"{CRM_SYNC_BASE_URL}/leads-sync",
             headers={"x-sync-secret": CRM_SYNC_SECRET, "Content-Type": "application/json"},
             json={
-                "clinic_id": CRM_CLINIC_ID,
-                "phone": telefone,
-                "whatsapp": telefone,
-                "first_name": primeiro_nome,
-                "last_name": sobrenome,
-                "interest": procedimento or None,
-                "source": origem or "WhatsApp",
-                "external_id": telefone,
+                "telefone": telefone,
+                "nome": nome or None,
+                "procedimento_interesse": procedimento or None,
+                "status": status,
+                "origem": origem or "WhatsApp",
             },
             timeout=10,
         )
@@ -430,25 +420,24 @@ def sincronizar_lead_crm(telefone: str, nome: str | None, procedimento: str | No
 
 
 def sincronizar_agendamento_crm(nome: str, procedimento: str, telefone: str, data_agendamento: str, horario_agendamento: str) -> None:
-    """Espelha um agendamento recém-confirmado na tabela appointments do CRM visual (Bolt)."""
+    """Espelha um agendamento recém-confirmado na tabela appointments do CRM visual (Bolt —
+    projeto 'Prompt Creation'), via a Server Function appointments-sync."""
     if not CRM_SYNC_SECRET:
         return
     try:
-        inicio = datetime.strptime(horario_agendamento, "%H:%M")
-        fim = (inicio + timedelta(hours=1)).strftime("%H:%M")
+        momento = datetime.strptime(
+            f"{data_agendamento} {horario_agendamento}", "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=FUSO_HORARIO)
         httpx.post(
             f"{CRM_SYNC_BASE_URL}/appointments-sync",
             headers={"x-sync-secret": CRM_SYNC_SECRET, "Content-Type": "application/json"},
             json={
-                "clinic_id": CRM_CLINIC_ID,
-                "patient_name": nome or "Lead",
-                "patient_phone": telefone,
+                "client_name": nome or "Lead",
                 "procedure": procedimento or None,
-                "date": data_agendamento,
-                "start_time": horario_agendamento,
-                "end_time": fim,
-                "status": "scheduled",
-                "external_id": f"{telefone}-{data_agendamento}-{horario_agendamento}",
+                "phone": telefone,
+                "appointment_time": momento.isoformat(),
+                "status": "agendado",
+                "notes": None,
             },
             timeout=10,
         )
