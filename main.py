@@ -73,6 +73,19 @@ MAPA_STATUS_CRM = {
 
 HISTORICO_MAX_MENSAGENS = 20  # quantas mensagens recentes mandamos pro Claude como contexto
 
+# Quantas mensagens de ENTRADA seguidas e idênticas (ignorando maiúsculas/espaços) indicam um
+# possível loop com outro sistema automático (dois bots respondendo em círculo com textos fixos)
+# em vez de uma pessoa real — humanos praticamente nunca mandam a mesma frase 3x seguidas.
+MENSAGENS_IDENTICAS_PARA_SUSPEITAR_LOOP = 3
+
+# Texto usado tanto como "tipo" do alerta (pra não duplicar alertas do mesmo motivo) quanto como
+# mensagem enviada pra equipe.
+MOTIVO_ALERTA_LOOP = (
+    "Possível loop com outro sistema automático (conversa muito longa sem resolução, ou "
+    "mensagens repetidas em sequência) — respostas automáticas pausadas até a equipe assumir "
+    "manualmente."
+)
+
 # Se o lead mandar mensagem dentro desta janela depois de um atendimento encerrado, reabrimos
 # a MESMA conversa (com todo o histórico) em vez de começar uma em branco — evita que uma
 # pergunta de acompanhamento logo após um agendamento derrube nome, procedimento e horário já
@@ -364,6 +377,31 @@ def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
     enviar_mensagem_whatsapp(clinica["instancia"], EQUIPE_WHATSAPP, texto)
 
 
+def parece_loop_com_outro_bot(historico: list[dict]) -> bool:
+    """Duas situações que indicam que provavelmente NÃO é uma pessoa real do outro lado:
+    (1) a conversa já acumulou o máximo de mensagens de contexto sem nunca ter sido encerrada
+    normalmente, ou (2) as últimas mensagens de ENTRADA são idênticas (ignorando maiúsculas e
+    espaços) — o padrão clássico de dois sistemas automáticos respondendo em círculo com textos
+    fixos."""
+    if len(historico) >= HISTORICO_MAX_MENSAGENS:
+        return True
+    entradas = [m["texto"].strip().lower() for m in historico if m["direcao"] == "entrada"]
+    if len(entradas) < MENSAGENS_IDENTICAS_PARA_SUSPEITAR_LOOP:
+        return False
+    ultimas = entradas[-MENSAGENS_IDENTICAS_PARA_SUSPEITAR_LOOP:]
+    return len(set(ultimas)) == 1
+
+
+def ja_alertado_por_loop(lead_id: str) -> bool:
+    """Evita mandar o mesmo alerta de novo a cada mensagem enquanto o loop continuar — só
+    alerta uma vez até a equipe marcar o alerta como resolvido."""
+    existente = supabase_get(
+        "alerts",
+        {"lead_id": f"eq.{lead_id}", "tipo": f"eq.{MOTIVO_ALERTA_LOOP}", "resolvido": "eq.false", "limit": 1},
+    )
+    return bool(existente)
+
+
 # ---------------------------------------------------------------------------
 # CRM visual (Bolt) — espelho best-effort via Server Functions
 # ---------------------------------------------------------------------------
@@ -466,9 +504,10 @@ async def webhook_whatsapp(request: Request):
         return {"ignorado": "mensagem enviada por nos"}
 
     remote_jid = key.get("remoteJid", "")
-    if remote_jid.endswith("@g.us"):
-        # Mensagem de grupo — este bot atende conversas 1:1 com leads, não grupos.
-        return {"ignorado": "mensagem de grupo"}
+    if remote_jid.endswith("@g.us") or remote_jid.endswith("@broadcast"):
+        # Mensagem de grupo ou de lista de transmissão/status — este bot atende conversas 1:1
+        # com leads, nunca grupos nem broadcasts.
+        return {"ignorado": "mensagem de grupo ou broadcast"}
 
     texto_recebido = extrair_texto_mensagem(data)
     if not texto_recebido:
@@ -487,6 +526,15 @@ async def webhook_whatsapp(request: Request):
     salvar_mensagem(conversa["id"], "entrada", texto_recebido)
 
     historico = historico_da_conversa(conversa["id"])
+
+    if parece_loop_com_outro_bot(historico):
+        # Provavelmente não é uma pessoa real do outro lado (outro chatbot, uma mensagem
+        # automática de ausência, etc.) — para de responder sozinho pra não entrar num vaivém
+        # infinito, e avisa a equipe uma única vez pra assumir manualmente se for o caso.
+        if not ja_alertado_por_loop(lead["id"]):
+            enviar_alerta(clinica, lead, MOTIVO_ALERTA_LOOP)
+        return {"ignorado": "possível loop de mensagens automáticas — respostas pausadas"}
+
     mensagens_claude = [
         {"role": "user" if m["direcao"] == "entrada" else "assistant", "content": m["texto"]} for m in historico
     ]
