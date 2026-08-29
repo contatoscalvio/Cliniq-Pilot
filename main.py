@@ -17,16 +17,19 @@ uma condição pra ele existir. Isso evita perder rastro de conversas abandonada
 meio, que era o problema original que esse projeto inteiro tenta resolver.
 
 Segunda decisão de design (após revisar uma conversa real de teste): o atendimento
-precisa ter início e fim. Sem isso, o bot emenda mensagens novas no mesmo histórico
-pra sempre, mesmo depois que o assunto do lead já foi resolvido. Por isso a ferramenta
-`responder_e_classificar` tem um campo `encerrar_atendimento` — quando o Claude marca
-esse campo como true, a conversa atual é fechada (`conversations.encerrada_em`) e a
-próxima mensagem do lead abre uma conversa nova, com contexto limpo.
+precisa ter início e fim, mas isso é sempre uma pergunta e resposta explícitas ao
+lead ("posso te ajudar em mais alguma coisa?"), nunca uma suposição do bot nem um
+corte automático por tempo ou tamanho de histórico — o bot sempre continua
+respondendo. Quando o Claude marca `encerrar_atendimento` como true (porque o
+próprio lead confirmou que não precisa de mais nada), a conversa atual é fechada
+(`conversations.encerrada_em`). Se o lead voltar a mandar mensagem depois — minutos,
+horas ou dias depois — a MESMA conversa é reaberta (nunca criamos uma em branco),
+preservando todo o histórico e contexto já combinado.
 """
 
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -62,25 +65,6 @@ CRM_SYNC_BASE_URL = os.environ.get(
 CRM_SYNC_SECRET = os.environ.get("CRM_SYNC_SECRET", "")
 
 HISTORICO_MAX_MENSAGENS = 20  # quantas mensagens recentes mandamos pro Claude como contexto
-
-# Quantas mensagens de ENTRADA seguidas e idênticas (ignorando maiúsculas/espaços) indicam um
-# possível loop com outro sistema automático (dois bots respondendo em círculo com textos fixos)
-# em vez de uma pessoa real — humanos praticamente nunca mandam a mesma frase 3x seguidas.
-MENSAGENS_IDENTICAS_PARA_SUSPEITAR_LOOP = 3
-
-# Texto usado tanto como "tipo" do alerta (pra não duplicar alertas do mesmo motivo) quanto como
-# mensagem enviada pra equipe.
-MOTIVO_ALERTA_LOOP = (
-    "Possível loop com outro sistema automático (conversa muito longa sem resolução, ou "
-    "mensagens repetidas em sequência) — respostas automáticas pausadas até a equipe assumir "
-    "manualmente."
-)
-
-# Se o lead mandar mensagem dentro desta janela depois de um atendimento encerrado, reabrimos
-# a MESMA conversa (com todo o histórico) em vez de começar uma em branco — evita que uma
-# pergunta de acompanhamento logo após um agendamento derrube nome, procedimento e horário já
-# combinados. Passado esse tempo, aí sim consideramos que é um assunto novo de verdade.
-JANELA_REABERTURA_CONVERSA = timedelta(hours=2)
 
 # Fuso horário usado pra calcular datas reais (ex.: "próxima segunda-feira") — sem
 # isso o Claude não tem como saber que dia é hoje.
@@ -153,10 +137,14 @@ FERRAMENTA_RESPOSTA = {
             "encerrar_atendimento": {
                 "type": "boolean",
                 "description": (
-                    "true quando esta mensagem encerra o atendimento — o lead já agendou, já tirou a "
-                    "dúvida que tinha, ou se despediu e não precisa de mais nada agora. false enquanto "
-                    "o atendimento ainda está em aberto. Quando true, a mensagem_para_lead deve soar "
-                    "como um encerramento natural, não como mais uma pergunta."
+                    "true SOMENTE quando o lead acabou de responder 'não' (ou equivalente) à pergunta "
+                    "'posso te ajudar em mais alguma coisa?' — ou seja, você já perguntou isso numa "
+                    "mensagem anterior e o lead confirmou que não precisa de mais nada. false em "
+                    "qualquer outro caso, inclusive logo depois de confirmar um agendamento ou "
+                    "esclarecer uma dúvida: nesses casos você deve perguntar 'posso te ajudar em mais "
+                    "alguma coisa?' e aguardar a resposta antes de encerrar. Quando true, a "
+                    "mensagem_para_lead deve soar como uma despedida natural, não como mais uma "
+                    "pergunta."
                 ),
             },
             "motivo_alerta": {
@@ -242,13 +230,22 @@ Regras:
   confirma em até 24h. Sempre que confirmar esse dia e horário, preencha também os campos
   data_agendamento (AAAA-MM-DD) e horario_agendamento (HH:MM) da ferramenta, usando a mesma
   data que você calculou para a resposta.
-- Todo atendimento tem início e fim, mas só marque encerrar_atendimento como true quando o
-  PRÓPRIO LEAD sinalizar claramente que não precisa de mais nada agora — uma despedida, um
-  "obrigado, é só isso" ou equivalente. Confirmar um agendamento, sozinho, NÃO é motivo para
-  encerrar: é exatamente quando o lead mais tende a mandar perguntas de acompanhamento (quem
-  vai atender, endereço, o que levar). Quando o encerramento for claro, feche a conversa de
-  forma natural e educada (agradeça, reforce o próximo passo se houver). Não fique reabrindo
-  assuntos já resolvidos nem insistindo depois que o lead já se despediu.
+- Todo atendimento tem início e fim, mas o encerramento é sempre uma pergunta e resposta
+  explícitas, nunca uma suposição sua. Sempre que você terminar de resolver o que o lead
+  precisava agora — confirmou um agendamento, tirou uma dúvida, recebeu a informação que queria
+  — pergunte de forma natural e simpática "Posso te ajudar em mais alguma coisa?" (ou uma
+  variação equivalente no seu tom de voz) em vez de encerrar direto. Nesse momento
+  encerrar_atendimento é false.
+  - Se o lead responder que sim (ou pedir outra coisa), continue atendendo normalmente a partir
+    do que ele precisar, e encerrar_atendimento continua false.
+  - Se o lead responder que não precisa de mais nada (ou equivalente — "só isso", "por enquanto
+    é isso", um "obrigado" de despedida), aí sim marque encerrar_atendimento como true e feche a
+    conversa de forma natural e educada (agradeça, reforce o próximo passo se houver).
+  - Se, mais tarde (mesmo depois de dias), o mesmo lead voltar a mandar mensagem numa conversa já
+    encerrada, trate normalmente: entenda o que ele precisa agora, ajude, e quando terminar
+    pergunte de novo "posso te ajudar em mais alguma coisa?", repetindo esse mesmo ciclo.
+  Não fique reabrindo assuntos já resolvidos nem insistindo depois que o lead já disse que não
+  precisa de mais nada.
 - Se perceber que está repetindo a mesma pergunta ou resposta sem avançar (o lead não
   conseguiu resolver algo com você em duas tentativas), preencha motivo_alerta para a equipe
   assumir, em vez de insistir sozinha.
@@ -299,12 +296,11 @@ def buscar_ou_criar_lead(clinic_id: str, telefone: str) -> dict:
 
 
 def buscar_ou_criar_conversa(lead_id: str) -> dict:
-    """Reaproveita a conversa mais recente do lead se ela ainda estiver aberta OU se tiver
-    sido encerrada há pouco tempo (dentro de JANELA_REABERTURA_CONVERSA) — nesse caso,
-    reabre a mesma conversa (limpa encerrada_em) em vez de começar uma em branco. Isso evita
-    que uma pergunta de acompanhamento logo depois de um agendamento derrube todo o contexto
-    já combinado (nome, procedimento, dia e horário). Só depois dessa janela é que uma
-    mensagem nova do lead começa, de fato, uma conversa com contexto limpo."""
+    """Sempre reaproveita a conversa mais recente do lead — mesmo que tenha sido encerrada há
+    muito tempo (horas ou dias) — reabrindo-a (limpando encerrada_em) em vez de começar uma
+    em branco. Isso preserva nome, procedimento, histórico e tudo que já foi combinado com o
+    lead, não importa quanto tempo tenha passado desde o último atendimento. Só cria uma
+    conversa nova quando o lead nunca teve nenhuma conversa antes."""
     existente = supabase_get(
         "conversations",
         {
@@ -315,14 +311,10 @@ def buscar_ou_criar_conversa(lead_id: str) -> dict:
     )
     if existente:
         conversa = existente[0]
-        if conversa["encerrada_em"] is None:
-            return conversa
-
-        encerrada_em = datetime.fromisoformat(conversa["encerrada_em"].replace("Z", "+00:00"))
-        if datetime.now(timezone.utc) - encerrada_em < JANELA_REABERTURA_CONVERSA:
+        if conversa["encerrada_em"] is not None:
             supabase_update("conversations", conversa["id"], {"encerrada_em": None})
             conversa["encerrada_em"] = None
-            return conversa
+        return conversa
 
     return supabase_insert("conversations", {"lead_id": lead_id})
 
@@ -365,31 +357,6 @@ def enviar_alerta(clinica: dict, lead: dict, motivo: str) -> None:
         f"Motivo: {motivo}"
     )
     enviar_mensagem_whatsapp(clinica["instancia"], EQUIPE_WHATSAPP, texto)
-
-
-def parece_loop_com_outro_bot(historico: list[dict]) -> bool:
-    """Duas situações que indicam que provavelmente NÃO é uma pessoa real do outro lado:
-    (1) a conversa já acumulou o máximo de mensagens de contexto sem nunca ter sido encerrada
-    normalmente, ou (2) as últimas mensagens de ENTRADA são idênticas (ignorando maiúsculas e
-    espaços) — o padrão clássico de dois sistemas automáticos respondendo em círculo com textos
-    fixos."""
-    if len(historico) >= HISTORICO_MAX_MENSAGENS:
-        return True
-    entradas = [m["texto"].strip().lower() for m in historico if m["direcao"] == "entrada"]
-    if len(entradas) < MENSAGENS_IDENTICAS_PARA_SUSPEITAR_LOOP:
-        return False
-    ultimas = entradas[-MENSAGENS_IDENTICAS_PARA_SUSPEITAR_LOOP:]
-    return len(set(ultimas)) == 1
-
-
-def ja_alertado_por_loop(lead_id: str) -> bool:
-    """Evita mandar o mesmo alerta de novo a cada mensagem enquanto o loop continuar — só
-    alerta uma vez até a equipe marcar o alerta como resolvido."""
-    existente = supabase_get(
-        "alerts",
-        {"lead_id": f"eq.{lead_id}", "tipo": f"eq.{MOTIVO_ALERTA_LOOP}", "resolvido": "eq.false", "limit": 1},
-    )
-    return bool(existente)
 
 
 # ---------------------------------------------------------------------------
@@ -519,14 +486,6 @@ async def webhook_whatsapp(request: Request):
     salvar_mensagem(conversa["id"], "entrada", texto_recebido)
 
     historico = historico_da_conversa(conversa["id"])
-
-    if parece_loop_com_outro_bot(historico):
-        # Provavelmente não é uma pessoa real do outro lado (outro chatbot, uma mensagem
-        # automática de ausência, etc.) — para de responder sozinho pra não entrar num vaivém
-        # infinito, e avisa a equipe uma única vez pra assumir manualmente se for o caso.
-        if not ja_alertado_por_loop(lead["id"]):
-            enviar_alerta(clinica, lead, MOTIVO_ALERTA_LOOP)
-        return {"ignorado": "possível loop de mensagens automáticas — respostas pausadas"}
 
     mensagens_claude = [
         {"role": "user" if m["direcao"] == "entrada" else "assistant", "content": m["texto"]} for m in historico
