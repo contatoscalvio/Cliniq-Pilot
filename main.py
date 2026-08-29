@@ -427,7 +427,7 @@ def sincronizar_agendamento_crm(nome: str, procedimento: str, telefone: str, dat
                 "procedure": procedimento or None,
                 "phone": telefone,
                 "appointment_time": momento.isoformat(),
-                "status": "agendado",
+                "status": "scheduled",
                 "notes": None,
             },
             timeout=10,
