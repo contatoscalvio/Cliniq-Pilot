@@ -29,7 +29,7 @@ preservando todo o histórico e contexto já combinado.
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -190,10 +190,25 @@ FERRAMENTA_RESPOSTA = {
 
 
 def data_e_hora_atual() -> str:
-    """Data/hora de agora no fuso da clínica, em texto — pro Claude calcular datas reais."""
+    """Data/hora de agora no fuso da clínica, em texto — pro Claude saber o instante atual."""
     agora = datetime.now(FUSO_HORARIO)
     dia_semana = DIAS_DA_SEMANA[agora.weekday()]
     return f"{dia_semana}, {agora.strftime('%d/%m/%Y')}, {agora.strftime('%H:%M')}"
+
+
+def calendario_referencia(dias: int = 21) -> str:
+    """Lista, já calculada em Python (nunca pelo próprio Claude), os próximos `dias` dias a
+    partir de hoje com o dia da semana correto ao lado de cada data. Modelos de linguagem
+    erram com frequência a aritmética de "que dia da semana cai tal data" quando têm que
+    calcular isso sozinhos de cabeça — foi exatamente esse tipo de erro que fez o bot oferecer
+    datas com o dia da semana errado pro lead. Dar essa tabela pronta transforma o trabalho do
+    Claude em uma simples consulta (achar a linha certa), não em uma conta."""
+    hoje = datetime.now(FUSO_HORARIO).date()
+    linhas = []
+    for i in range(dias):
+        dia = hoje + timedelta(days=i)
+        linhas.append(f"{DIAS_DA_SEMANA[dia.weekday()]}, {dia.strftime('%d/%m/%Y')}")
+    return "\n".join(linhas)
 
 
 def montar_prompt_sistema(clinica: dict) -> str:
@@ -201,9 +216,18 @@ def montar_prompt_sistema(clinica: dict) -> str:
     return f"""
 Você é a assistente de WhatsApp da {clinica['nome']}, uma clínica de estética.
 
-Agora é: {data_e_hora_atual()}. Use essa informação para calcular datas reais — se o lead
-pedir "segunda-feira" ou "semana que vem", calcule você mesma o dia e o mês exatos. Nunca
-peça para o lead calcular ou pesquisar uma data por você.
+Agora é: {data_e_hora_atual()}.
+
+Calendário de referência (dia da semana já calculado corretamente — NUNCA calcule você
+mesma o dia da semana de uma data, nem a data de um dia da semana: apenas procure a linha
+certa nesta lista e copie exatamente):
+{calendario_referencia()}
+
+Sempre que o lead pedir algo como "segunda-feira" ou "semana que vem", ache a linha
+correspondente nessa lista e use a data ao lado dela. Ao oferecer ou confirmar qualquer
+dia, o dia da semana que você disser e a data (dd/mm) têm que ser exatamente o par que
+aparece junto nessa lista — nunca combine um dia da semana de uma linha com a data de
+outra. Nunca peça para o lead calcular ou pesquisar uma data por você.
 
 Tom de voz: {clinica.get('tom_de_voz') or 'acolhedor, próximo e profissional'}.
 Tratamentos oferecidos: {clinica.get('tratamentos') or 'não informado'}.
